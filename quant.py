@@ -9,6 +9,77 @@ import torchvision
 from torchvision.io import read_image
 from pytorch_nndct.apis import torch_quantizer
 from models.common import DetectMultiBackend
+
+# class CustomImageDataset(Dataset):
+#     def __init__(self, label_dir, img_dir, width, height, transforms=None):
+#         self.label_dir = label_dir
+#         self.img_dir = img_dir
+#         self.transforms = transforms
+#         self.height = height
+#         self.width = width
+#
+#         self.img_names = []
+#         for filename in os.listdir(img_dir):
+#             temp = os.path.splitext(filename)
+#             self.img_names.append(temp[0])
+#
+#     def gen_id(name: str):
+#         name = ''.join((x for x in name if x.isdigit()))
+#         name = name[0:10] + name[11:len(name)]
+#         return int(name)
+#
+#     def __len__(self):
+#         return len(self.img_names)
+#
+#     def __getitem__(self, idx):
+#         img_filename = self.img_names[idx] + ".jpg"
+#         label_filename = self.img_names[idx] + ".txt"
+#         img_path = os.path.join(self.img_dir, img_filename)
+#         label_path = os.path.join(self.label_dir, label_filename)
+#
+#         image = read_image(img_path)
+#         image = torchvision.transforms.Resize((self.width, self.height))(image)
+#         image = image.float()  # uint8 to fp16/32
+#         image /= 255  # 0 - 255 to 0.0 - 1.0
+#
+#         boxes_array = []
+#         labels_array = []
+#
+#         with open(label_path) as f:
+#             lines = f.readlines()
+#             for line in lines:
+#                 vals = line.split(" ")
+#                 labels_array.append(int(vals[0]))
+#                 x0 = (float(vals[1]) - (float(vals[3]) / 2)) * self.width
+#                 y0 = (float(vals[2]) - (float(vals[4]) / 2)) * self.height
+#                 x1 = (float(vals[1]) + (float(vals[3]) / 2)) * self.width
+#                 y1 = (float(vals[2]) + (float(vals[4]) / 2)) * self.height
+#                 boxes_array.append([x0, y0, x1, y1])
+#
+#         boxes_tensor = torch.as_tensor(boxes_array, dtype=torch.float32)
+#         area_tensor = (boxes_tensor[:, 3] - boxes_tensor[:, 1]) * (boxes_tensor[:, 2] - boxes_tensor[:, 0])
+#         iscrowd_tensor = torch.zeros((boxes_tensor.shape[0],), dtype=torch.int64)
+#         labels_tensor = torch.as_tensor(labels_array, dtype=torch.int64)
+#
+#         target = {}
+#         target["boxes"] = boxes_tensor
+#         target["labels"] = labels_tensor
+#         target["area"] = area_tensor
+#         target["iscrowd"] = iscrowd_tensor
+#         # img_id = torch.tensor([self.gen_id(self.img_names[idx])])
+#         img_id = torch.tensor([idx + 1])
+#         target["image_id"] = img_id
+#
+#         if self.transforms:
+#             sample = self.transform(image=image, bboxes=target["boxes"], labels=labels_tensor)
+#             image = sample['image']
+#             target['boxes'] = torch.Tensor(sample['bboxes'])
+#
+#         return image, target
+
+import os
+import torch
+from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms as T
 
@@ -76,6 +147,9 @@ class CustomImageDataset(Dataset):
         }
 
         return image, target
+
+
+## ====== class end ====
 
 def xywh2xyxy(x):
     # Convert nx4 boxes from [x, y, w, h] to [x1, y1, x2, y2] where xy1=top-left, xy2=bottom-right
@@ -211,6 +285,8 @@ def quantize(build_dir, quant_mode, weights, dataset):
     quantized_model = quantizer.quant_model
     quantized_model = quantized_model.to(device)
 
+    # test_dataset = CustomImageDataset(os.path.join(dataset + 'labels'), os.path.join(dataset + 'images'), 640, 640)
+    # test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
     test_dataset = CustomImageDataset(dataset, 640, 640)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 

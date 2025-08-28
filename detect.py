@@ -265,7 +265,7 @@ def postprocessing(x):
         if grid[i].shape[2:4] != x[i].shape[2:4]:
             grid[i], anchor_grid[i] = make_grid(nx,ny,i,anchors,stride)
 
-            
+
         xy, wh, conf = x[i].sigmoid().split((2, 2, 13 + 1), 4)
         xy = (xy * 2 + grid[i]) * stride[i]  # xy
         wh = (wh * 2) ** 2 * anchor_grid[i]  # wh

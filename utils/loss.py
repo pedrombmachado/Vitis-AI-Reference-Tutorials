@@ -119,60 +119,61 @@ class ComputeLoss:
         self.device = device
 
     def __call__(self, p, targets):  # predictions, targets
-        lcls = torch.zeros(1, device=self.device)  # class loss
-        lbox = torch.zeros(1, device=self.device)  # box loss
-        lobj = torch.zeros(1, device=self.device)  # object loss
-        tcls, tbox, indices, anchors = self.build_targets(p, targets)  # targets
+        lcls = torch.zeros(1, device=self.device)
+        lbox = torch.zeros(1, device=self.device)
+        lobj = torch.zeros(1, device=self.device)
 
-        # Losses
-        for i, pi in enumerate(p):  # layer index, layer predictions
-            b, a, gj, gi = indices[i]  # image, anchor, gridy, gridx
-            tobj = torch.zeros(pi.shape[:4], dtype=pi.dtype, device=self.device)  # target obj
+        # Build targets
+        tcls, tbox, indices, anchors = self.build_targets(p, targets)
+
+        # Loop over detection layers
+        for i, pi in enumerate(p):  # pi = raw conv output [bs, c, ny, nx]
+            bs, c, ny, nx = pi.shape
+            na = self.na
+            no = c // na  # outputs per anchor
+            pi = pi.view(bs, na, no, ny, nx)  # [bs, na, no, ny, nx]
+
+            b, a, gj, gi = indices[i]  # image, anchor, grid y, grid x
+            tobj = torch.zeros(bs, na, ny, nx, dtype=pi.dtype, device=self.device)
 
             n = b.shape[0]  # number of targets
             if n:
-                # pxy, pwh, _, pcls = pi[b, a, gj, gi].tensor_split((2, 4, 5), dim=1)  # faster, requires torch 1.8.0
-                pxy, pwh, _, pcls = pi[b, a, gj, gi].split((2, 2, 1, self.nc), 1)  # target-subset of predictions
+                pred = pi[b, a, :, gj, gi]  # [n, no]
+                pxy = pred[:, :2].sigmoid() * 2 - 0.5
+                pwh = (pred[:, 2:4].sigmoid() * 2) ** 2 * anchors[i]
+                pobj = pred[:, 4:5]
+                pcls = pred[:, 5:] if self.nc > 0 else torch.zeros((n, 0), device=self.device)
 
-                # Regression
-                pxy = pxy.sigmoid() * 2 - 0.5
-                pwh = (pwh.sigmoid() * 2) ** 2 * anchors[i]
-                pbox = torch.cat((pxy, pwh), 1)  # predicted box
-                iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()  # iou(prediction, target)
-                lbox += (1.0 - iou).mean()  # iou loss
+                # Box loss
+                pbox = torch.cat((pxy, pwh), 1)
+                iou = bbox_iou(pbox, tbox[i], CIoU=True).squeeze()
+                lbox += (1.0 - iou).mean()
 
-                # Objectness
+                # Objectness target
                 iou = iou.detach().clamp(0).type(tobj.dtype)
-                if self.sort_obj_iou:
-                    j = iou.argsort()
-                    b, a, gj, gi, iou = b[j], a[j], gj[j], gi[j], iou[j]
-                if self.gr < 1:
-                    iou = (1.0 - self.gr) + self.gr * iou
-                tobj[b, a, gj, gi] = iou  # iou ratio
+                tobj[b, a, gj, gi] = iou
 
-                # Classification
-                if self.nc > 1:  # cls loss (only if multiple classes)
-                    t = torch.full_like(pcls, self.cn, device=self.device)  # targets
+                # Class loss
+                if self.nc > 1:
+                    t = torch.full_like(pcls, self.cn, device=self.device)
                     t[range(n), tcls[i]] = self.cp
-                    lcls += self.BCEcls(pcls, t)  # BCE
+                    lcls += self.BCEcls(pcls, t)
 
-                # Append targets to text file
-                # with open('targets.txt', 'a') as file:
-                #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
-
-            obji = self.BCEobj(pi[..., 4], tobj)
-            lobj += obji * self.balance[i]  # obj loss
+            # Objectness loss
+            pi_obj = pi[:, :, 4, :, :]  # [bs, na, ny, nx]
+            obji = self.BCEobj(pi_obj, tobj)
+            lobj += obji * self.balance[i]
             if self.autobalance:
                 self.balance[i] = self.balance[i] * 0.9999 + 0.0001 / obji.detach().item()
 
-        if self.autobalance:
-            self.balance = [x / self.balance[self.ssi] for x in self.balance]
+        # Scale by hyperparameters
         lbox *= self.hyp['box']
         lobj *= self.hyp['obj']
         lcls *= self.hyp['cls']
-        bs = tobj.shape[0]  # batch size
+        bs = targets.shape[0]
 
         return (lbox + lobj + lcls) * bs, torch.cat((lbox, lobj, lcls)).detach()
+
 
     def build_targets(self, p, targets):
         # Build targets for compute_loss(), input targets(image,class,x,y,w,h)
