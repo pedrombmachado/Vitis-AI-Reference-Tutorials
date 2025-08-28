@@ -9,71 +9,71 @@ import torchvision
 from torchvision.io import read_image
 from pytorch_nndct.apis import torch_quantizer
 from models.common import DetectMultiBackend
+from PIL import Image
+import torchvision.transforms as T
+
+def parse_yolo_labels(label_path, img_w, img_h):
+    """
+    Parse YOLO label file -> torch.Tensor of shape [num_objects, 5]
+    Format per line: class x y w h (all normalised 0-1)
+    """
+    boxes = []
+    labels = []
+    with open(label_path, "r") as f:
+        for line in f.readlines():
+            cls, x, y, w, h = map(float, line.strip().split())
+            labels.append(int(cls))
+            boxes.append([x * img_w, y * img_h, w * img_w, h * img_h])  # scale back to pixels
+    if boxes:
+        boxes = torch.tensor(boxes, dtype=torch.float32)
+        labels = torch.tensor(labels, dtype=torch.int64)
+    else:
+        boxes = torch.zeros((0, 4), dtype=torch.float32)
+        labels = torch.zeros((0,), dtype=torch.int64)
+    return boxes, labels
+
 
 class CustomImageDataset(Dataset):
-    def __init__(self, label_dir, img_dir, width, height, transforms=None):
-        self.label_dir = label_dir
-        self.img_dir = img_dir
-        self.transforms = transforms
-        self.height = height
-        self.width = width
+    def __init__(self, img_label_dir, img_size_w=640, img_size_h=640, transform=None):
+        self.img_size_w = img_size_w
+        self.img_size_h = img_size_h
 
-        self.img_names = []
-        for filename in os.listdir(img_dir):
-            temp = os.path.splitext(filename)
-            self.img_names.append(temp[0])
+        if transform is None:
+            self.transform = T.Compose([
+                T.Resize((img_size_h, img_size_w)),
+                T.ToTensor(),
+            ])
+        else:
+            self.transform = transform
 
-    def gen_id(name: str):
-        name = ''.join((x for x in name if x.isdigit()))
-        name = name[0:10] + name[11:len(name)]
-        return int(name)
+        exts = (".jpg", ".jpeg", ".png", ".bmp")
+        self.images = [f for f in os.listdir(img_label_dir) if f.lower().endswith(exts)]
+        self.images.sort()
+
+        self.samples = []
+        for img_file in self.images:
+            img_path = os.path.join(img_label_dir, img_file)
+            label_path = os.path.splitext(img_path)[0] + ".txt"
+            if os.path.exists(label_path):
+                self.samples.append((img_path, label_path))
+            else:
+                print(f"⚠️ Skipping {img_file} (no label found).")
 
     def __len__(self):
-        return len(self.img_names)
+        return len(self.samples)
 
     def __getitem__(self, idx):
-        img_filename = self.img_names[idx] + ".jpg"
-        label_filename = self.img_names[idx] + ".txt"
-        img_path = os.path.join(self.img_dir, img_filename)
-        label_path = os.path.join(self.label_dir, label_filename)
+        img_path, label_path = self.samples[idx]
+        image = Image.open(img_path).convert("RGB")
+        image = self.transform(image)
 
-        image = read_image(img_path)
-        image = torchvision.transforms.Resize((self.width, self.height))(image)
-        image = image.float()  # uint8 to fp16/32
-        image /= 255  # 0 - 255 to 0.0 - 1.0
+        boxes, labels = parse_yolo_labels(label_path, self.img_size_w, self.img_size_h)
 
-        boxes_array = []
-        labels_array = []
-
-        with open(label_path) as f:
-            lines = f.readlines()
-            for line in lines:
-                vals = line.split(" ")
-                labels_array.append(int(vals[0]))
-                x0 = (float(vals[1]) - (float(vals[3]) / 2)) * self.width
-                y0 = (float(vals[2]) - (float(vals[4]) / 2)) * self.height
-                x1 = (float(vals[1]) + (float(vals[3]) / 2)) * self.width
-                y1 = (float(vals[2]) + (float(vals[4]) / 2)) * self.height
-                boxes_array.append([x0, y0, x1, y1])
-
-        boxes_tensor = torch.as_tensor(boxes_array, dtype=torch.float32)
-        area_tensor = (boxes_tensor[:, 3] - boxes_tensor[:, 1]) * (boxes_tensor[:, 2] - boxes_tensor[:, 0])
-        iscrowd_tensor = torch.zeros((boxes_tensor.shape[0],), dtype=torch.int64)
-        labels_tensor = torch.as_tensor(labels_array, dtype=torch.int64)
-
-        target = {}
-        target["boxes"] = boxes_tensor
-        target["labels"] = labels_tensor
-        target["area"] = area_tensor
-        target["iscrowd"] = iscrowd_tensor
-        # img_id = torch.tensor([self.gen_id(self.img_names[idx])])
-        img_id = torch.tensor([idx + 1])
-        target["image_id"] = img_id
-
-        if self.transforms:
-            sample = self.transform(image=image, bboxes=target["boxes"], labels=labels_tensor)
-            image = sample['image']
-            target['boxes'] = torch.Tensor(sample['bboxes'])
+        target = {
+            "image_id": torch.tensor([idx]),   # quant.py expects this
+            "boxes": boxes,                    # [N,4] tensor
+            "labels": labels                   # [N] tensor
+        }
 
         return image, target
 
@@ -211,7 +211,7 @@ def quantize(build_dir, quant_mode, weights, dataset):
     quantized_model = quantizer.quant_model
     quantized_model = quantized_model.to(device)
 
-    test_dataset = CustomImageDataset(os.path.join(dataset + 'labels'), os.path.join(dataset + 'images'), 640, 640)
+    test_dataset = CustomImageDataset(dataset, 640, 640)
     test_loader = torch.utils.data.DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     quantized_model.eval()
